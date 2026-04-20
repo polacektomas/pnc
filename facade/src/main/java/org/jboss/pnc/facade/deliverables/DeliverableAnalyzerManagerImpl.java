@@ -22,7 +22,6 @@ import com.github.packageurl.PackageURL;
 import com.github.packageurl.PackageURLBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.jboss.pnc.api.deliverablesanalyzer.dto.Artifact;
-import org.jboss.pnc.api.deliverablesanalyzer.dto.ArtifactType;
 import org.jboss.pnc.api.deliverablesanalyzer.dto.Build;
 import org.jboss.pnc.api.deliverablesanalyzer.dto.BuildSystemType;
 import org.jboss.pnc.api.deliverablesanalyzer.dto.FinderResult;
@@ -656,23 +655,18 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
     }
 
     private static String createFileName(Artifact artifact) {
-        String filename;
-
         if (artifact instanceof MavenArtifact) {
             MavenArtifact mavenArtifact = (MavenArtifact) artifact;
-            filename = mavenArtifact.getArtifactId() + "-" + mavenArtifact.getVersion();
+            String filename = mavenArtifact.getArtifactId() + "-" + mavenArtifact.getVersion();
             if (!Strings.isEmpty(mavenArtifact.getClassifier())) {
                 filename += "-" + mavenArtifact.getClassifier();
             }
-            filename += "." + mavenArtifact.getType();
+            return filename + "." + mavenArtifact.getType();
         } else if (artifact instanceof WindowsArtifact) {
             WindowsArtifact windowsArtifact = (WindowsArtifact) artifact;
-            filename = windowsArtifact.getFilename();
-        } else {
-            throw new IllegalArgumentException("Unsupported artifact type: " + artifact.getArtifactType());
+            return windowsArtifact.getFilename();
         }
-
-        return filename;
+        throw new IllegalArgumentException("Unsupported artifact type: " + artifact.getArtifactType());
     }
 
     private String createBrewOriginURL(Artifact artifact, String nvr) {
@@ -705,20 +699,19 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
                 if (!StringUtils.isEmpty(mavenArtifact.getClassifier())) {
                     purlBuilder.withQualifier("classifier", mavenArtifact.getClassifier());
                 }
-
+                return purlBuilder.build().toString();
             } else if (artifact instanceof WindowsArtifact) {
                 WindowsArtifact windowsArtifact = (WindowsArtifact) artifact;
-                purlBuilder = PackageURLBuilder.aPackageURL()
+                return PackageURLBuilder.aPackageURL()
                         .withType(PackageURL.StandardTypes.GENERIC)
                         .withName(windowsArtifact.getName())
                         .withVersion(windowsArtifact.getVersion())
                         .withQualifier("filename", windowsArtifact.getFilename())
-                        .withQualifier("platforms", String.join(",", windowsArtifact.getPlatforms()));
-
-            } else {
-                throw new IllegalArgumentException("Unsupported artifact type: " + artifact.getArtifactType());
+                        .withQualifier("platforms", String.join(",", windowsArtifact.getPlatforms()))
+                        .build()
+                        .toString();
             }
-            return purlBuilder.build().toString();
+            throw new IllegalArgumentException("Unsupported artifact type: " + artifact.getArtifactType());
         } catch (MalformedPackageURLException e) {
             throw new RuntimeException(e);
         }
@@ -760,9 +753,8 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
         } else if (artifact instanceof WindowsArtifact) {
             WindowsArtifact windowsArtifact = (WindowsArtifact) artifact;
             return String.join("-", windowsArtifact.getName(), windowsArtifact.getVersion());
-        } else {
-            throw new IllegalArgumentException("Unsupported artifact type: " + artifact.getArtifactType());
         }
+        throw new IllegalArgumentException("Unsupported artifact type: " + artifact.getArtifactType());
     }
 
     private TargetRepository getDistributionRepository(String distURL) {
@@ -919,8 +911,8 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
             this.user = user;
             prefetchPNCArtifacts(builds);
             prefetchTargetRepos(builds);
-            prefetchBrewArtifacts(builds);
-            prefetchBrewImportedArtifacts(builds);
+            prefetchBrewArtifacts(builds, false);
+            prefetchBrewArtifacts(builds, true);
         }
 
         private void prefetchPNCArtifacts(Collection<Build> builds) {
@@ -929,7 +921,7 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
             Set<Integer> ids = builds.stream()
                     .filter(b -> b.getBuildSystemType() == BuildSystemType.PNC)
                     .flatMap(b -> b.getArtifacts().stream())
-                    .map(a -> a.getPncId())
+                    .map(Artifact::getPncId)
                     .map(artifactMapper.getIdMapper()::toEntity)
                     .collect(Collectors.toSet());
 
@@ -953,20 +945,20 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
             if (!queries.isEmpty()) {
                 List<TargetRepository> targetRepositories = targetRepositoryRepository
                         .queryByIdentifiersAndPaths(queries);
-                for (TargetRepository targetRepository : targetRepositories) {
-                    targetRepositoryCache.put(targetRepository.getRepositoryPath(), targetRepository);
-                }
+                targetRepositories.forEach(
+                        targetRepository -> targetRepositoryCache
+                                .put(targetRepository.getRepositoryPath(), targetRepository));
             }
             log.debug("Preloaded {} target repos to cache.", targetRepositoryCache.size());
         }
 
-        private void prefetchBrewArtifacts(Collection<Build> builds) {
-            log.debug("Preloading brew artifacts...");
+        private void prefetchBrewArtifacts(Collection<Build> builds, boolean isImport) {
+            log.debug("Preloading brew {}artifacts...", isImport ? "imported " : "");
             int initialCacheSize = brewCache.size();
 
             Set<IdentifierSha256> identifierSha256Set = builds.stream()
                     .filter(b -> b.getBuildSystemType() == BuildSystemType.BREW)
-                    .filter(b -> !b.isImport())
+                    .filter(b -> b.isImport() == isImport)
                     .flatMap(this::prefetchBrewBuild)
                     .collect(Collectors.toSet());
 
@@ -978,41 +970,15 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
                 // artifacts!), find a best match.
                 Map<IdentifierSha256, List<org.jboss.pnc.model.Artifact>> groupedByIdentifierSha256 = artifacts.stream()
                         .collect(Collectors.groupingBy(org.jboss.pnc.model.Artifact::getIdentifierSha256));
+
                 groupedByIdentifierSha256.forEach(
-                        (key, matchedArtifacts) -> brewCache
-                                .put(key, getBestMatchingArtifact(matchedArtifacts, false).get()));
+                        (key, matchedArtifacts) -> getBestMatchingArtifact(matchedArtifacts, isImport)
+                                .ifPresent(artifact -> brewCache.put(key, artifact)));
             }
             log.debug(
-                    "Preloaded {} brew artifacts to cache, total cache size: {}.",
+                    "Preloaded {} brew {}artifacts to cache, total cache size: {}.",
                     brewCache.size() - initialCacheSize,
-                    brewCache.size());
-        }
-
-        private void prefetchBrewImportedArtifacts(Collection<Build> builds) {
-            log.debug("Preloading brew imported artifacts...");
-            int initialCacheSize = brewCache.size();
-
-            Set<IdentifierSha256> identifierSha256Set = builds.stream()
-                    .filter(b -> b.getBuildSystemType() == BuildSystemType.BREW)
-                    .filter(b -> b.isImport())
-                    .flatMap(this::prefetchBrewBuild)
-                    .collect(Collectors.toSet());
-
-            if (!identifierSha256Set.isEmpty()) {
-                Set<org.jboss.pnc.model.Artifact> artifacts = artifactRepository
-                        .withIdentifierAndSha256(identifierSha256Set);
-                // Search for all artifacts with the provided SHA-256 and identifiers.
-                // If more than one artifact is found for the same SHA-256 and identifier (should not happen for Maven
-                // artifacts!), find a best match.
-                Map<IdentifierSha256, List<org.jboss.pnc.model.Artifact>> groupedByIdentifierSha256 = artifacts.stream()
-                        .collect(Collectors.groupingBy(org.jboss.pnc.model.Artifact::getIdentifierSha256));
-                groupedByIdentifierSha256.forEach(
-                        (key, matchedArtifacts) -> brewCache
-                                .put(key, getBestMatchingArtifact(matchedArtifacts, true).get()));
-            }
-            log.debug(
-                    "Preloaded {} brew imported artifacts to cache, total cache size: {}.",
-                    brewCache.size() - initialCacheSize,
+                    isImport ? "imported " : "",
                     brewCache.size());
         }
 
@@ -1029,10 +995,20 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
         }
 
         private void assertBrewArtifacts(Artifact artifact) {
-            if (!(artifact.getArtifactType() == null || artifact.getArtifactType() == ArtifactType.MAVEN)) {
-                throw new IllegalArgumentException(
-                        "Brew artifacts are expected to be either MAVEN or unknown, artifact " + artifact + " is "
-                                + artifact.getArtifactType());
+            if (artifact.getArtifactType() == null) {
+                return; // Unknown / Generic Artifacts
+            }
+
+            switch (artifact.getArtifactType()) {
+                case MAVEN:
+                case WINDOWS:
+                    break;
+                default:
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "Unsupported Brew artifact type. Expected MAVEN, WINDOWS or unknown, but got %s for artifact: %s",
+                                    artifact.getArtifactType(),
+                                    artifact));
             }
         }
 
@@ -1046,12 +1022,8 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
 
         public TargetRepository findOrCreateTargetRepository(Build build) {
             String path = getKojiPath(build);
-            TargetRepository tr = targetRepositoryCache.get(path);
-            if (tr == null) {
-                tr = createRepository(path, INDY_MAVEN, RepositoryType.MAVEN);
-                targetRepositoryCache.put(path, tr);
-            }
-            return tr;
+            return targetRepositoryCache
+                    .computeIfAbsent(path, p -> createRepository(p, INDY_MAVEN, RepositoryType.MAVEN));
         }
 
         private org.jboss.pnc.model.Artifact findOrCreateBrewArtifact(
