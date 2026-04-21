@@ -911,8 +911,8 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
             this.user = user;
             prefetchPNCArtifacts(builds);
             prefetchTargetRepos(builds);
-            prefetchBrewArtifacts(builds, false);
-            prefetchBrewArtifacts(builds, true);
+            prefetchBrewArtifacts(builds);
+            prefetchBrewImportedArtifacts(builds);
         }
 
         private void prefetchPNCArtifacts(Collection<Build> builds) {
@@ -950,6 +950,14 @@ public class DeliverableAnalyzerManagerImpl implements org.jboss.pnc.facade.Deli
                                 .put(targetRepository.getRepositoryPath(), targetRepository));
             }
             log.debug("Preloaded {} target repos to cache.", targetRepositoryCache.size());
+        }
+
+        private void prefetchBrewImportedArtifacts(Collection<Build> builds) {
+            prefetchBrewArtifacts(builds, true);
+        }
+
+        private void prefetchBrewArtifacts(Collection<Build> builds) {
+            prefetchBrewArtifacts(builds, false);
         }
 
         private void prefetchBrewArtifacts(Collection<Build> builds, boolean isImport) {
